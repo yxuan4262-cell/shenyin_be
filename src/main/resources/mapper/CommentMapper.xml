@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.tongji.comment.mapper.CommentMapper">
+
+    <!-- ============================================================
+         resultMap：项目没开 mybatis.configuration.map-underscore-to-camel-case，
+         所以下划线列名 → 驼峰属性必须在这里手工声明，否则字段全是 null。
+         ============================================================ -->
+    <resultMap id="CommentResultMap" type="com.tongji.comment.model.Comment">
+        <id property="id" column="id"/>
+        <result property="postId" column="post_id"/>
+        <result property="creatorId" column="creator_id"/>
+        <result property="parentId" column="parent_id"/>
+        <result property="content" column="content"/>
+        <result property="status" column="status"/>
+        <result property="createTime" column="create_time"/>
+        <result property="updateTime" column="update_time"/>
+    </resultMap>
+
+    <!-- 列表行映射：comments JOIN users 的结果载体 -->
+    <resultMap id="CommentRowResultMap" type="com.tongji.comment.model.CommentRow">
+        <id property="id" column="id"/>
+        <result property="postId" column="post_id"/>
+        <result property="creatorId" column="creator_id"/>
+        <result property="parentId" column="parent_id"/>
+        <result property="content" column="content"/>
+        <result property="status" column="status"/>
+        <result property="authorNickname" column="author_nickname"/>
+        <result property="authorAvatar" column="author_avatar"/>
+        <result property="createTime" column="create_time"/>
+    </resultMap>
+
+    <!-- ============================================================
+         可复用 SQL 片段（DRY）。
+
+         切分原则：只抽「列清单」和「FROM + JOIN」，绝不抽 WHERE / ORDER BY / LIMIT。
+         后三样每个查询都不一样，硬塞进片段会让片段变成「半个查询」，
+         谁 include 谁踩坑——这是 <sql> 最常见的误用。
+
+         这两个片段是配套的：include 了 columns 就必须 include from，
+         因为列清单里引用了 u.nickname / u.avatar，而别名 u 是在 from 片段里 JOIN 进来的。
+
+         <include> 是纯文本替换，发生在解析 XML 时（不是运行时），
+         所以它不能引用 #{param}，也不参与动态标签求值。
+         ============================================================ -->
+    <sql id="commentRowColumns">
+        c.id, c.post_id, c.creator_id, c.parent_id, c.content, c.status, c.create_time,
+        u.nickname AS author_nickname, u.avatar AS author_avatar
+    </sql>
+
+    <sql id="commentRowFrom">
+        FROM comments c
+        JOIN users u ON u.id = c.creator_id
+    </sql>
+
+    <!-- ============================================================ -->
+
+    <insert id="insert" parameterType="com.tongji.comment.model.Comment">
+        INSERT INTO comments (
+            id, post_id, creator_id, parent_id, content, status, create_time, update_time
+        ) VALUES (
+            #{id}, #{postId}, #{creatorId}, #{parentId}, #{content}, #{status}, #{createTime}, #{updateTime}
+        )
+    </insert>
+
+    <select id="findById" parameterType="long" resultMap="CommentResultMap">
+        SELECT * FROM comments WHERE id = #{id}
+    </select>
+
+    <!-- 软删除：WHERE 带 creator_id 做归属校验 + status='normal' 防重复删除 -->
+    <update id="softDelete">
+        UPDATE comments
+        SET status = 'deleted', update_time = NOW()
+        WHERE id = #{id} AND creator_id = #{creatorId} AND status = 'normal'
+    </update>
+
+    <!-- 分页列表：命中 ix_comments_post_status_ct (post_id, status, create_time) -->
+    <select id="listByPost" resultMap="CommentRowResultMap">
+        SELECT <include refid="commentRowColumns"/>
+        <include refid="commentRowFrom"/>
+        WHERE c.post_id = #{postId} AND c.status = 'normal'
+        ORDER BY c.create_time DESC, c.id DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <!-- ============================================================
+         高级筛选：6 个可选条件 + 3 种排序 + 分页。
+
+         六个动态 SQL 要点，每一个都对应一个真实的坑：
+
+         1) <where> 会自动吃掉开头多余的 AND / OR，且内部全空时整个 WHERE 子句消失。
+            所以每个 <if> 里都老老实实写 AND，不需要 WHERE 1=1 那种丑东西。
+            它等价于 <trim prefix="WHERE" prefixOverrides="AND |OR ">。
+
+         2) test 里是 OGNL 表达式，不是 Java。
+            - 多参数方法必须靠 @Param 暴露名字，否则只能用 param1/arg0。
+            - 多字符单引号（'time_asc'）OGNL 解析成 String，比较安全；
+              但单字符（'A'）会被解析成 char，与 String 比较恒为 false——经典陷阱。
+            - !statusList.isEmpty() 是 OGNL 支持的方法调用，等价于 not 关键字。
+
+         3) >= 和 <= 在 XML 里必须写成 &gt;= 和 &lt;=。
+            < 是 XML 的标签起始符，裸写会让文档非良构、启动即解析失败。
+            （也可以用 <![CDATA[ ... ]]> 包住整段，但那样 <if> 就失效了，
+             因为 CDATA 里的内容不再被当作标签——所以只在纯文本 SQL 里用 CDATA。）
+
+         4) LIKE 用 CONCAT('%', #{keyword}, '%') 拼通配符：
+            - 值仍然走 #{} 预编译占位符，杜绝注入；
+            - 写成 LIKE '%#{keyword}%' 是错的：引号里的 ? 不会被当作占位符，
+              最终变成匹配字面量 "%?%"，永远查不到东西，且不报错——最阴的一种失效。
+            - 写成 LIKE '%${keyword}%' 是 SQL 注入，用户输入直接拼进 SQL 文本。
+            末尾的 ESCAPE '\\' 配合 Service 层对 % _ \ 的转义，
+            防止用户搜 "%" 时匹配全表、把数据库拖垮。
+
+         5) statusList 先判 null 再判 isEmpty()：
+            空列表会让 <foreach> 渲染出 status IN ()，这是 MySQL 语法错误，
+            而且是运行期才炸、编译期毫无征兆。
+            （Service 层已保证传下来的永远是非空合法列表，这里是第二道防线。）
+
+         6) 排序用 <choose> 把可能性枚举死，用户输入永远进不了 SQL 文本。
+            ORDER BY 不能用 #{sort}：占位符只能替代「值」不能替代「标识符」，
+            会渲染成 ORDER BY '?' ——MySQL 按常量排序，结果顺序不变且不报错，静默失效。
+            更不能用 ${sort}：那是把用户输入直接拼进 SQL，注入。
+
+         索引利用情况（EXPLAIN 可验证）：
+         - 只传 postId    → 命中 ix_comments_post_status_ct 最左前缀
+         - 只传 creatorId → 命中 ix_comments_creator_ct
+         - 都不传         → 全表扫描 + filesort，属预期代价（低频的管理端查询）
+         - LIKE '%xx%'    → 前置通配符必然放弃索引，这是模糊搜索的固有代价；
+                            真要优化得上 Elasticsearch（第九阶段）
+         ============================================================ -->
+    <select id="searchComments" resultMap="CommentRowResultMap">
+        SELECT <include refid="commentRowColumns"/>
+        <include refid="commentRowFrom"/>
+        <where>
+            <if test="postId != null">
+                AND c.post_id = #{postId}
+            </if>
+            <if test="creatorId != null">
+                AND c.creator_id = #{creatorId}
+            </if>
+            <if test="keyword != null and keyword != ''">
+                AND c.content LIKE CONCAT('%', #{keyword}, '%') ESCAPE '\\'
+            </if>
+            <if test="startTime != null">
+                AND c.create_time &gt;= #{startTime}
+            </if>
+            <if test="endTime != null">
+                AND c.create_time &lt;= #{endTime}
+            </if>
+            <if test="statusList != null and !statusList.isEmpty()">
+                AND c.status IN
+                <foreach collection="statusList" item="st" open="(" separator="," close=")">
+                    #{st}
+                </foreach>
+            </if>
+        </where>
+        <choose>
+            <when test="sort == 'time_asc'">ORDER BY c.create_time ASC, c.id ASC</when>
+            <when test="sort == 'creator'">ORDER BY c.creator_id ASC, c.id DESC</when>
+            <otherwise>ORDER BY c.create_time DESC, c.id DESC</otherwise>
+        </choose>
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+</mapper>

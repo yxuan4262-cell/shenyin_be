@@ -1,0 +1,51 @@
+# ============================================================
+#  第十阶段·第四课 练习A：最小 CI 流水线（build + test，不推镜像）
+#
+#  触发时机：push 到 main / 提 PR / GitHub UI 上手动 dispatch
+#  跑在哪：GitHub 免费借你一台临时干净的 Ubuntu 机器（runner），用完即销毁
+#  第一次跑：~10 分钟（Maven 冷启动下依赖）
+#  后续跑：  pom 不变则缓存命中，约 1-2 分钟（对应 Q2 的 Maven 缓存）
+# ============================================================
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: {}                 # 允许在 Actions 页面手动跑一次（学习期最常用）
+
+# Q3 呼应：默认只给 read（最小权限原则），未来要写什么再单独加
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 1) 把 GitHub 上的代码搬到 runner 这台临时机器
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2) 装 Java 21(Temurin) + 打开 ~/.m2 依赖缓存（Q2 第一处缓存）
+      #    cache key 绑 hashFiles('**/pom.xml')——pom 一字不变 → 秒取依赖
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # 3) 编译 + 跑单元测试 + 打包（Q1：你现有 3 个测试全是纯单元/Mockito，CI 无需 .env）
+      #    -B 批处理模式；-ntp 不打印下载进度；package 阶段 surefire 自动跑 test
+      - name: Build & Test
+        run: mvn -B -ntp clean package
+
+      # 4) 失败时能看 surefire 报告；成功时把 jar 上传成 artifact（保留 7 天）
+      - name: Upload jar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zhiguang-jar
+          path: target/*.jar
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,167 @@
+# ============================================================
+#  知光（ZhiGuang）后端配置
+#  标注【必填】的需要根据实际环境修改，其余可使用默认值
+# ============================================================
+
+server:
+  port: 8080
+
+# -------- MyBatis --------
+# 工作区路径含中文/空格时，默认的 classpath*: 通配扫描可能找不到 XML，改用 classpath: 显式指定
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+ 
+spring:
+  # -------- 配置导入：本地从项目根 .env(gitignore)读密钥，容器由 compose env 注入 --------
+  config:
+    import: optional:file:.env[.properties]
+  # -------- MySQL 数据源【必填】 --------
+  datasource:
+    url: jdbc:mysql://localhost:3306/zhiguang?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:123456}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  # -------- Redis（Redisson 复用此配置） --------
+  data:
+    redis:
+      host: localhost
+      port: 6340
+      # password:          # 有密码时取消注释
+      database: 0
+
+  # -------- Kafka【必填】 --------
+  kafka:
+    bootstrap-servers: localhost:9092
+    # 生产者可靠性：
+    #   acks=all       —— 等所有 ISR 副本落盘才算发送成功（最强持久性，配合幂等是官方推荐组合）
+    #   idempotence    —— 幂等生产：broker 按 PID+序列号去重，消除「producer 重试导致的 broker 端重复」
+    #   max.in.flight≤5—— 幂等的前置约束；≤5 时仍能保证单分区内消息顺序
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+    # 消费者：手动提交位点的前提——必须关掉自动提交，否则两套提交机制冲突
+    consumer:
+      enable-auto-commit: false
+    # 监听器：ack-mode=manual_immediate 让 ack.acknowledge() 真正生效（调用即刻提交）。
+    #   缺此配置时默认 BATCH：acknowledge() 抛 IllegalStateException 被吞，位点由容器自动提交，
+    #   叠加 catch 吞异常 → 处理失败也提交 → 消息静默丢失（第三课缺陷①②的总根源）。
+    listener:
+      ack-mode: manual_immediate
+
+  # -------- Elasticsearch【必填】 --------
+  # 前缀对应 EsProperties（prefix = "spring.elasticsearch"）
+  elasticsearch:
+    uris: http://localhost:9200
+    # username:            # ES 开启 xpack.security 时填写
+    # password:
+
+  # -------- 邮件服务【必填】 --------
+  mail:
+    host: smtp.qq.com
+    port: 587
+    username: ${MAIL_USERNAME:你的邮箱@qq.com}
+    password: ${MAIL_PASSWORD:邮箱授权码}
+
+  # -------- Spring AI --------
+  ai:
+    # DeepSeek 大模型（用于聊天对话）
+    deepseek:
+      api-key: ${DEEPSEEK_API_KEY:sk-not-configured}
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+      chat:
+        options:
+          model: deepseek-chat
+    # OpenAI Embedding（仅用于 RAG 向量索引）
+    # 注意：占位符 key 只为满足启动要求，调用 RAG 功能时需换成真实 OpenAI key
+    openai:
+      api-key: ${OPENAI_API_KEY:sk-placeholder}
+    # RAG 向量存储（写入 Elasticsearch）
+    vectorstore:
+      elasticsearch:
+        index-name: zhiguang-ai-index
+
+# ============================================================
+#  阿里云 OSS【必填】
+#  前缀对应 OssProperties（prefix = "oss"）
+# ============================================================
+oss:
+  endpoint: ${OSS_ENDPOINT:oss-cn-beijing.aliyuncs.com}
+  access-key-id: ${OSS_ACCESS_KEY_ID:not-configured}
+  access-key-secret: ${OSS_ACCESS_KEY_SECRET:not-configured}
+  bucket: ${OSS_BUCKET:zhiguang-mybucket}
+  # public-domain: https://cdn.example.com   # 可选：自定义 CDN 域名
+  folder: avatars
+
+# ============================================================
+#  JWT 认证配置
+#  前缀对应 AuthProperties（prefix = "auth"）
+# ============================================================
+auth:
+  jwt:
+    issuer: zhiguang
+    access-token-ttl: 15m          # 访问令牌有效期
+    refresh-token-ttl: 7d          # 刷新令牌有效期
+    key-id: zhiguang-key
+    private-key: classpath:keys/private.pem   # RSA 私钥（PKCS#8）
+    public-key: classpath:keys/public.pem     # RSA 公钥（X.509）
+  verification:
+    code-length: 6                 # 验证码位数
+    ttl: 5m                        # 验证码有效期
+    max-attempts: 5                # 最大校验尝试次数
+    send-interval: 60s             # 同标识连续发送最小间隔
+    daily-limit: 10                # 同标识每日发送上限
+  password:
+    bcrypt-strength: 12            # BCrypt 哈希强度
+    min-length: 8                  # 密码最小长度
+
+# ============================================================
+#  本地缓存 & 热点 Key 策略（全部有默认值，按需覆盖）
+#  前缀对应 CacheProperties（prefix = "cache"）
+# ============================================================
+# cache:
+#   l2:
+#     public-cfg:
+#       ttl-seconds: 15            # 公共信息流本地缓存 TTL
+#       max-size: 1000
+#     mine-cfg:
+#       ttl-seconds: 10
+#       max-size: 1000
+#     detail-cfg:
+#       ttl-seconds: 30
+#       max-size: 5000
+#   hotkey:
+#     window-seconds: 60
+#     segment-seconds: 10
+#     level-low: 50
+#     level-medium: 200
+#     level-high: 500
+#     extend-low-seconds: 20
+#     extend-medium-seconds: 60
+#     extend-high-seconds: 120
+
+# ============================================================
+#  计数器重建锁看门狗超时（默认 30000ms，按需覆盖）
+# ============================================================
+# counter:
+#   rebuild:
+#     lock:
+#       watchdog-ms: 30000
+
+# ============================================================
+#  Canal 配置（监听 MySQL binlog → 投递 Kafka）
+#  本地未部署 Canal Server，enabled=false；
+#  注意：当前代码 start() 未检查 enabled，连接失败仅打印错误日志，不影响启动
+# ============================================================
+canal:
+  enabled: false
+  host: localhost
+  port: 11111
+  destination: example
+  username: canal
+  password: canal
+  filter: zhiguang\\.outbox
+  batchSize: 100
+  intervalMs: 500

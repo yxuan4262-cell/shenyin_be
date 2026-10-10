@@ -1,0 +1,120 @@
+# 知光项目中间件 Docker Compose 配置
+# 使用方法：在此文件所在目录执行 docker-compose up -d
+
+services:
+
+  # ==================== Redis ====================
+  redis:
+    image: redis:7-alpine
+    container_name: zhiguang-redis
+    ports:
+      - "127.0.0.1:6340:6379"   # 【第六课B·关后门】只绑本机回环：本机 run-app 仍可 localhost:6340 调试，公网不再可达
+    restart: unless-stopped
+
+  # ==================== Elasticsearch ====================
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: zhiguang-es
+    environment:
+      - discovery.type=single-node        # 单节点模式
+      - xpack.security.enabled=false      # 关闭安全认证（开发环境）
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m" # JVM 内存限制
+    ports:
+      - "127.0.0.1:9200:9200"   # 【第六课B·关后门】只绑本机，公网不可达
+      - "127.0.0.1:9300:9300"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data   # 数据持久化
+    restart: unless-stopped
+
+  # ==================== Kafka（KRaft 模式，无需 Zookeeper） ====================
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: zhiguang-kafka
+    ports:
+      - "127.0.0.1:9092:9092"   # 【第六课B·关后门】EXTERNAL 监听器仅供本机 localhost:9092，公网不可达
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller          # 单节点同时充当 broker 和 controller
+      # 双监听器：EXTERNAL 给宿主机(localhost:9092)、INTERNAL 给 compose 内其它容器(kafka:29092)
+      KAFKA_LISTENERS: CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9092,INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: EXTERNAL://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1        # 单节点必须设为 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"          # 自动创建 Topic
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk               # KRaft 集群 ID（固定值）
+    restart: unless-stopped
+
+  # ==================== MySQL ====================
+  mysql:
+    image: mysql:8.0
+    container_name: zhiguang-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}   # 来自项目根 .env（compose 自动插值），不再硬编码
+      MYSQL_DATABASE: zhiguang               # schema.sql 未带 CREATE DATABASE，靠它建库
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "127.0.0.1:3306:3306"   # 【第六课B·关后门】只绑本机，公网不可达
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro   # 仅首次空卷时自动建表
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p\"$${MYSQL_ROOT_PASSWORD}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # ==================== 知光后端应用（第一课的 Dockerfile 在此被 compose 调用）====================
+  app:
+    build:
+      context: .               # 构建上下文＝本目录，.dockerignore 在此步生效
+      dockerfile: Dockerfile   # ← 回指第一课那份多阶段 Dockerfile
+    container_name: zhiguang-app
+    depends_on:
+      mysql:
+        condition: service_healthy      # 等 MySQL 真正可用(而非仅启动)
+      redis:
+        condition: service_started
+      elasticsearch:
+        condition: service_started
+      kafka:
+        condition: service_started
+    env_file:
+      - .env                             # 注入 MYSQL_PASSWORD/DEEPSEEK_API_KEY/OSS_* 等密钥(不硬编码进本文件)
+    environment:
+      SPRING_PROFILES_ACTIVE: prod       # 激活 application-prod.yml
+      MYSQL_HOST: mysql
+      MYSQL_DB: zhiguang
+      MYSQL_USER: root
+      # MYSQL_PASSWORD 由 env_file(.env) 提供，此处不再写明文
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"                 # 容器内真实端口6379(非宿主机映射的6340)
+      ES_URL: http://elasticsearch:9200
+      KAFKA_BOOTSTRAP: kafka:29092       # 走 INTERNAL 监听器
+    # 【第三课：关后门】不再把 8080 发布到公网；仅供 compose 内的 Nginx 走内线 app:8080 访问。
+    # 调试需临时直连时，改成本机回环（不暴露公网）：  ports: [ "127.0.0.1:8080:8080" ]
+    restart: unless-stopped
+
+  # ==================== Nginx 反向代理（第十阶段·第三课：对外唯一入口）====================
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: zhiguang-nginx
+    depends_on:
+      - app
+    ports:
+      - "80:80"          # 正门(HTTP)：保留供本机验证；上线可改 301 跳 443
+      - "443:443"        # 【第六课B·开 HTTPS】加密正门，TLS 在 nginx 终结
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro   # 接待规则(改它无需重建镜像)
+      - ../zhiguang_fe/dist:/usr/share/nginx/html:ro           # 前端构建产物(由 nginx 的 location / 提供，与 /api 同门牌)
+      - ./nginx/certs:/etc/nginx/certs:ro                      # 【第六课B】证书目录(fullchain.pem/privkey.pem)
+    restart: unless-stopped
+
+volumes:
+  es-data:
+  mysql-data:

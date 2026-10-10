@@ -1,0 +1,34 @@
+# ============================================================
+#  知光后端 .dockerignore —— 把「无关 / 危险」挡在构建上下文之外
+#  对照 Q4：构建产物、版本库、IDE 配置一律排除
+#  （docker build 第一步会把整个上下文目录打包传给 daemon，这些不该进）
+# ============================================================
+
+# ---- 构建产物：每次 build 都在变，留着会打爆缓存 + 旧 class 可能混入镜像 ----
+target/
+
+# ---- 版本库与 IDE 配置：含完整提交历史 / 本地路径 / 数据源凭据，纯泄密 + 体积负担 ----
+#      （.idea/dataSources.xml 存了数据库连接信息；.git 里历史密钥可被翻出）
+.git/
+.gitignore
+.idea/
+*.iml
+.vscode/
+
+# ---- 本地脚本 / 测试辅助：不参与 Maven 构建，无需进镜像 ----
+*.ps1
+http/
+
+# ---- 日志 ----
+logs/
+*.log
+
+# ---- Docker 自身与文档：构建镜像不需要 ----
+Dockerfile
+.dockerignore
+docker-compose.yml
+README.md
+docs/
+
+# 注意：src/main/resources/keys/ 下的 private.pem 是应用运行期需要的 classpath 资源，
+#       绝不能在这里排除，否则打出的 jar 会缺密钥。

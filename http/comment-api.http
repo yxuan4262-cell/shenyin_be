@@ -1,0 +1,280 @@
+### ============================================================
+### 评论模块接口测试（IDE 内置 HTTP Client 通用格式）
+###
+### 用法：
+###   IntelliJ IDEA  —— 每个请求左侧有绿色 ▶ 按钮，点击即发送
+###   Qoder / VS Code —— 需安装 "REST Client" 扩展（humao.rest-client），
+###                      请求上方会出现 "Send Request" 链接
+###
+### 为什么要用这个而不是浏览器地址栏：
+###   浏览器地址栏只能发 GET，且无法附加 Authorization 请求头，
+###   所以 POST / DELETE 接口和需要登录的接口在地址栏里必然失败。
+### ============================================================
+
+@baseUrl = http://localhost:8080
+@postId = 9001
+
+### 把下面这行的值替换成你登录拿到的 accessToken（不含引号）
+### 注意 TTL 只有 15 分钟，过期就跑一遍 http/get-token.ps1 重新取
+@token = PASTE_YOUR_ACCESS_TOKEN_HERE
+
+
+### ------------------------------------------------------------
+### 【第一步】获取验证码
+### 端点是 /api/v1/auth/send-code（不是 /auth/register/send-code）
+### 三个字段全部必填：scene、identifierType、identifier
+###   scene: REGISTER（注册）/ LOGIN（登录）/ RESET_PASSWORD（改密码）
+###
+### 项目用 LoggingCodeSender，不会真发邮件，验证码打进应用日志。
+### 日志形如：
+###   Send verification code scene=LOGIN identifier=xxx code=024476 expireMinutes=5
+### 去哪看：
+###   IDE 里点 Run 启动  → 直接看 Run 控制台
+###   命令行脱离启动     → Get-Content "$env:TEMP\zg-run.log" | Select-String "Send verification code"
+###
+### 限制：有效期 5 分钟；同账号两次发送间隔 ≥ 60 秒；每日上限 10 次
+### ------------------------------------------------------------
+POST {{baseUrl}}/api/v1/auth/send-code
+Content-Type: application/json
+
+{
+  "scene": "LOGIN",
+  "identifierType": "EMAIL",
+  "identifier": "learner@zhiguang.dev"
+}
+
+
+### ------------------------------------------------------------
+### 【第二步 A】登录（learner@zhiguang.dev 已注册过，走这条）
+### ⚠️ accessToken 藏在响应的 token 对象里，不是顶层字段：
+###      { "user": {...}, "token": { "accessToken": "eyJ...", ... } }
+###    复制 token.accessToken 的值，填到文件顶部的 @token
+### ------------------------------------------------------------
+POST {{baseUrl}}/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "identifierType": "EMAIL",
+  "identifier": "learner@zhiguang.dev",
+  "code": "938937"
+}
+
+
+### ------------------------------------------------------------
+### 【第二步 B】注册新账号（换新邮箱时走这条，第一步的 scene 要改成 REGISTER）
+### 端点是 /api/v1/auth/register（不带 /email 后缀）
+### password 可选；agreeTerms 必须为 true，否则业务校验不通过
+### clientInfo 不在 body 里——服务端自己从请求头解析 IP 与 User-Agent
+### ------------------------------------------------------------
+POST {{baseUrl}}/api/v1/auth/register
+Content-Type: application/json
+
+{
+  "identifierType": "EMAIL",
+  "identifier": "newcomer@zhiguang.dev",
+  "code": "938937",
+  "password": "Abcd1234!",
+  "agreeTerms": true
+}
+
+
+### ------------------------------------------------------------
+### 【无需登录】查看某篇知文的评论列表 —— 唯一能在浏览器直接开的接口
+### ------------------------------------------------------------
+GET {{baseUrl}}/api/v1/comments/post/{{postId}}?page=1&size=20
+
+
+### 【无需登录】翻页（size 会被 Service 钳制到最大 50）
+GET {{baseUrl}}/api/v1/comments/post/{{postId}}?page=1&size=999
+
+
+### ------------------------------------------------------------
+### 【需登录】发表顶层评论
+### 期望：200，返回 commentId（雪花 ID 的字符串形式）
+### ------------------------------------------------------------
+POST {{baseUrl}}/api/v1/comments
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "postId": {{postId}},
+  "content": "通过 HTTP Client 发的顶层评论",
+  "parentId": null
+}
+
+
+### 【需登录】发表楼中楼回复（parentId 换成上一条返回的 commentId）
+POST {{baseUrl}}/api/v1/comments
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "postId": {{postId}},
+  "content": "这是回复内容",
+  "parentId": 355329950846423040
+}
+
+
+### 【校验演示】content 全是空格 → 期望 400 + {"code":"BAD_REQUEST","message":"不能为空"}
+POST {{baseUrl}}/api/v1/comments
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "postId": {{postId}},
+  "content": "    "
+}
+
+
+### 【校验演示】postId 不存在 → 期望 400 + POST_NOT_FOUND
+POST {{baseUrl}}/api/v1/comments
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "postId": 99999999,
+  "content": "这篇知文不存在"
+}
+
+
+### 【鉴权演示】不带 Authorization 头 → 期望 401，且响应体为空
+POST {{baseUrl}}/api/v1/comments
+Content-Type: application/json
+
+{
+  "postId": {{postId}},
+  "content": "没有 token 想发评论"
+}
+
+
+### ------------------------------------------------------------
+### 【需登录】删除自己的评论 → 期望 204，且响应体为空
+### 把 commentId 换成你要删的那条
+### ------------------------------------------------------------
+DELETE {{baseUrl}}/api/v1/comments/355329950846423040
+Authorization: Bearer {{token}}
+
+
+### 【软删除演示】重复删同一条 → 期望 400 + COMMENT_NOT_FOUND
+### （因为 selectById 的 SQL 带 status='normal'，已删的查不出来）
+DELETE {{baseUrl}}/api/v1/comments/355329950846423040
+Authorization: Bearer {{token}}
+
+
+### 【越权演示】换成"别人"的 token 去删你的评论 → 期望 400 + COMMENT_FORBIDDEN
+### 前提：先用另一个邮箱走一遍第一、二步，把那个 token 填到这里
+DELETE {{baseUrl}}/api/v1/comments/355329950846423040
+Authorization: Bearer PASTE_ANOTHER_USER_TOKEN
+
+
+### ============================================================
+### 高级筛选 GET /api/v1/comments/search（第五阶段练习成果）
+###
+### 全部参数可选，一个都不传就是"查所有 normal 评论"。
+### 需登录——它不在 SecurityConfig 的 permitAll 名单里。
+###
+### 参数表：
+###   postId      Long          等于匹配
+###   creatorId   Long          等于匹配
+###   keyword     String        LIKE '%kw%'，通配符已转义，最长 50 字
+###   startTime   ISO-8601      create_time >= ，必须带时区，如 2026-09-01T00:00:00Z
+###   endTime     ISO-8601      create_time <=
+###   statusList  String[]      重复传参：statusList=normal&statusList=deleted
+###   sort        String        time_desc（默认）/ time_asc / creator
+###   page        int           钳制到 [1,10000]
+###   size        int           钳制到 [1,50]
+###
+### 一键跑完 26 条断言：
+###   powershell -NoProfile -ExecutionPolicy Bypass -File .\http\search-acceptance.ps1
+### ============================================================
+
+### 一个参数都不传 → 200，XML 里 <where> 内部全空会整个消失
+GET {{baseUrl}}/api/v1/comments/search
+Authorization: Bearer {{token}}
+
+
+### 只传 keyword（中文要 URL 编码；IDE 的 HTTP Client 会自动帮你编）
+GET {{baseUrl}}/api/v1/comments/search?keyword=回复
+Authorization: Bearer {{token}}
+
+
+### 只传 postId
+GET {{baseUrl}}/api/v1/comments/search?postId=9001&page=1&size=10
+Authorization: Bearer {{token}}
+
+
+### 查已删除的评论 → 200，items 里 status 为 deleted
+GET {{baseUrl}}/api/v1/comments/search?statusList=deleted
+Authorization: Bearer {{token}}
+
+
+### 多值 statusList：重复传同一个参数名，Spring 自动收成 List
+GET {{baseUrl}}/api/v1/comments/search?statusList=normal&statusList=deleted&sort=time_asc
+Authorization: Bearer {{token}}
+
+
+### 时间区间（两端都可选，各自独立生效）
+GET {{baseUrl}}/api/v1/comments/search?startTime=2026-09-01T00:00:00Z&endTime=2030-01-01T00:00:00Z
+Authorization: Bearer {{token}}
+
+
+### 组合全部条件
+GET {{baseUrl}}/api/v1/comments/search?postId=9001&creatorId=1&keyword=评论&statusList=normal&sort=creator&page=1&size=20
+Authorization: Bearer {{token}}
+
+
+### ------------------------------------------------------------
+### 下面是【故意做错】的用例，用来验证防线真的生效
+### ------------------------------------------------------------
+
+### 非法 sort → 400 BAD_REQUEST（Service 白名单拦下，不是静默走默认排序）
+GET {{baseUrl}}/api/v1/comments/search?sort=drop_table
+Authorization: Bearer {{token}}
+
+
+### 非法 statusList → 400 BAD_REQUEST（白名单，不静默丢弃）
+GET {{baseUrl}}/api/v1/comments/search?statusList=hacked
+Authorization: Bearer {{token}}
+
+
+### 空 statusList → 200 且等价于只查 normal
+### 关键：绝不能渲染出 status IN ()，那是 MySQL 语法错误
+GET {{baseUrl}}/api/v1/comments/search?statusList=
+Authorization: Bearer {{token}}
+
+
+### 时间格式非法（缺时区的纯日期）→ 400 BAD_REQUEST
+GET {{baseUrl}}/api/v1/comments/search?startTime=2026-09-01
+Authorization: Bearer {{token}}
+
+
+### startTime 晚于 endTime → 400 BAD_REQUEST
+GET {{baseUrl}}/api/v1/comments/search?startTime=2030-01-01T00:00:00Z&endTime=2026-01-01T00:00:00Z
+Authorization: Bearer {{token}}
+
+
+### keyword 传字面量 % → 200 但结果为空
+### 因为 Service 把它转义成 \%，只匹配内容里真的含 % 的评论；
+### 若不转义，LIKE '%%%' 会匹配全表，一次请求就能拖垮数据库
+GET {{baseUrl}}/api/v1/comments/search?keyword=%25
+Authorization: Bearer {{token}}
+
+
+### 不带 token → 401
+GET {{baseUrl}}/api/v1/comments/search
+
+
+### ============================================================
+### 附：知文 Feed 接口（需登录，浏览器地址栏同样打不开）
+### ============================================================
+GET {{baseUrl}}/api/v1/know-posts/feed?page=1&size=10
+Authorization: Bearer {{token}}
+
+
+### 附：健康检查（当前返回 503，说明有组件 DOWN）
+### 想看清是哪个组件，在 application.yml 加上：
+###   management:
+###     endpoint:
+###       health:
+###         show-details: always
+GET {{baseUrl}}/actuator/health

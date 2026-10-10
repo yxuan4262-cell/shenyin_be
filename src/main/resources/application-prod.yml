@@ -1,0 +1,44 @@
+# ============================================================
+#  生产 / 容器 profile（第十阶段·第二课）
+#  连接项全部走环境变量(12-Factor)：${VAR:default} 的默认值已适配 docker 服务名；
+#  docker-compose.yml 里 app 服务的 environment 会覆盖这些默认值。
+#  这里【只覆盖下列连接 key】，其余(mybatis/jwt/canal/server.port)沿用 application.yml；
+#  注：oss / spring.ai(deepseek、openai) / mail 的密钥在 application.yml 已改为 ${ENV:默认}，
+#      值由 docker-compose 的 env_file(.env) 注入，因此 prod 不再重复列这些秘密。
+# ============================================================
+spring:
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:mysql}:${MYSQL_PORT:3306}/${MYSQL_DB:zhiguang}?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:123456}
+
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}      # 容器内是真实端口 6379（宿主机才映射成 6340）
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:kafka:29092}   # 走 kafka 的 INTERNAL 监听器
+
+  elasticsearch:
+    uris: ${ES_URL:http://elasticsearch:9200}
+
+# ---------- 反向代理协作（第三课·练习B：让后厨"认传菜条" + 生产化）----------
+server:
+  # 信任 Nginx 递来的 X-Forwarded-For/Proto，还原真实客人IP与 https(否则 login_logs.ip 全同、isSecure 误判)
+  forward-headers-strategy: framework
+  shutdown: graceful                    # 滚动更新/停容器时，在途请求(尤其 SSE 流式)优雅收尾
+
+# spring.lifecycle 为扁平键（含点），Spring 可正确解析；不另开 spring: 块以免与上方重复
+spring.lifecycle:
+  timeout-per-shutdown-phase: 20s       # 优雅停机最长等待
+
+# ---------- 管理端点收紧（Q4：公网只看得到 UP/DOWN，细节仅授权可见）----------
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info            # 白名单，绝不用 *
+  endpoint:
+    health:
+      show-details: when-authorized     # 依赖明细不暴露给公网
